@@ -354,7 +354,7 @@ slurm_errtab_t slurm_errtab[] = {
 	{ ERRTAB_ENTRY(ESLURM_GROUP_ID_MISSING),
 	  "Invalid group id"					},
 	{ ERRTAB_ENTRY(ESLURM_BATCH_CONSTRAINT),
-	  "Job --batch option is invalid or not a subset of --constraints" },
+	  "Job --batch option is invalid or not a subset of --constraint" },
 	{ ERRTAB_ENTRY(ESLURM_INVALID_TRES),
 	  "Invalid Trackable RESource (TRES) specification"	},
 	{ ERRTAB_ENTRY(ESLURM_INVALID_TRES_BILLING_WEIGHTS),
@@ -480,6 +480,8 @@ slurm_errtab_t slurm_errtab[] = {
 	  "Max powered up nodes reached" },
 	{ ERRTAB_ENTRY(ESLURM_REQUESTED_TOPO_CONFIG_UNAVAILABLE),
 	  "Requested topology configuration is not available" },
+	{ ERRTAB_ENTRY(ESLURM_PREEMPTION_REQUIRED),
+	  "Preemption is required but is disabled on this system" },
 
 	/* SPANK errors */
 	{ ERRTAB_ENTRY(ESPANK_ERROR),

@@ -192,9 +192,16 @@ def run_command(
                     "This test requires the test user to have unprompted sudo rights",
                     allow_module_level=True,
                 )
-            # Use su to honor ulimits, specially core
             cp = subprocess.run(
-                ["sudo", "su", user, "/bin/bash", "-lc", command],
+                [
+                    "sudo",
+                    "--preserve-env=PATH",
+                    "-u",
+                    user,
+                    "/bin/bash",
+                    "-lc",
+                    command,
+                ],
                 capture_output=True,
                 text=True,
                 **additional_run_kwargs,
@@ -561,6 +568,8 @@ def start_slurmdbd(clean=False, quiet=False):
     if not properties["auto-config"]:
         require_auto_config("wants to start slurmdbd")
 
+    logging.debug("Starting slurmdbd...")
+
     if (
         run_command_exit(
             "sacctmgr show cluster", user=properties["slurm-user"], quiet=quiet
@@ -583,6 +592,8 @@ def start_slurmdbd(clean=False, quiet=False):
             "sacctmgr show cluster", lambda results: results["exit_code"] == 0
         ):
             pytest.fail(f"Slurmdbd is not running")
+        else:
+            logging.debug("Slurmdbd started successfully")
 
 
 def start_slurm(clean=False, quiet=False):
@@ -727,14 +738,14 @@ def stop_slurmdbd(quiet=False):
     if not properties["auto-config"]:
         require_auto_config("wants to stop slurmdbd")
 
+    logging.debug("Stopping slurmdbd...")
+
     # Stop slurmdbd
     results = run_command(
         "sacctmgr shutdown", user=properties["slurm-user"], quiet=quiet
     )
     if results["exit_code"] != 0:
-        failures.append(
-            f"Command \"sacctmgr shutdown\" failed with rc={results['exit_code']}"
-        )
+        pytest.fail(f"Command \"sacctmgr shutdown\" failed with rc={results['exit_code']}")
 
     # Verify that slurmdbd is not running (we might have to wait for rollups to complete)
     if not repeat_until(
@@ -743,6 +754,8 @@ def stop_slurmdbd(quiet=False):
         timeout=60,
     ):
         failures.append("Slurmdbd is still running")
+    else:
+        logging.debug("Slurmdbd stopped successfully")
 
 
 def stop_slurm(fatal=True, quiet=False):
@@ -954,9 +967,9 @@ def require_openapi_generator(version="7.3.0"):
         )
 
     # allow pointing to an existing OpenAPI generated client
-    opath = module_tmp_path;
+    opath = module_tmp_path
     if "SLURM_TESTSUITE_OPENAPI_CLIENT" in os.environ:
-        opath = os.environ['SLURM_TESTSUITE_OPENAPI_CLIENT'];
+        opath = os.environ["SLURM_TESTSUITE_OPENAPI_CLIENT"]
 
     pyapi_path = f"{opath}/pyapi/"
     spec_path = f"{opath}/openapi.json"

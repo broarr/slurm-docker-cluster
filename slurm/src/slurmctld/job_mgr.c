@@ -2729,6 +2729,8 @@ extern int kill_job_by_front_end_name(char *node_name)
 				job_update_tres_cnt(job_ptr, i);
 				if (job_ptr->node_cnt == 0) {
 					cleanup_completing(job_ptr);
+					if (!job_ptr->epilog_running)
+						batch_requeue_fini(job_ptr);
 				}
 				node_ptr = node_record_table_ptr[i];
 				if (node_ptr->comp_job_cnt)
@@ -2957,9 +2959,11 @@ extern int kill_running_job_by_node_name(char *node_name)
 			else {
 				error("node_cnt underflow on %pJ", job_ptr);
 			}
-			if (job_ptr->node_cnt == 0)
+			if (job_ptr->node_cnt == 0) {
 				cleanup_completing(job_ptr);
-
+				if (!job_ptr->epilog_running)
+					batch_requeue_fini(job_ptr);
+			}
 			if (node_ptr->comp_job_cnt)
 				(node_ptr->comp_job_cnt)--;
 			else {
@@ -3506,6 +3510,7 @@ extern job_record_t *job_array_split(job_record_t *job_ptr, bool list_add)
 	job_ptr_pend->id = copy_identity(job_ptr->id);
 	job_ptr_pend->licenses = xstrdup(job_ptr->licenses);
 	job_ptr_pend->license_list = license_copy(job_ptr->license_list);
+	job_ptr_pend->licenses_to_preempt = NULL;
 	job_ptr_pend->lic_req = xstrdup(job_ptr->lic_req);
 	job_ptr_pend->mail_user = xstrdup(job_ptr->mail_user);
 	job_ptr_pend->mcs_label = xstrdup(job_ptr->mcs_label);
@@ -6978,6 +6983,7 @@ extern int job_limits_check(job_record_t **job_pptr, bool check_min_time)
 		job_desc.pn_min_cpus = detail_ptr->orig_pn_min_cpus;
 		job_desc.job_id = job_ptr->job_id;
 		job_desc.bitflags = job_ptr->bit_flags;
+		job_desc.tres_per_task = xstrdup(job_ptr->tres_per_task);
 		if (!_valid_pn_min_mem(&job_desc, part_ptr)) {
 			/* debug2 message already logged inside the function. */
 			fail_reason = WAIT_PN_MEM_LIMIT;
@@ -6988,7 +6994,10 @@ extern int job_limits_check(job_record_t **job_pptr, bool check_min_time)
 			detail_ptr->min_cpus = job_desc.min_cpus;
 			detail_ptr->max_cpus = job_desc.max_cpus;
 			detail_ptr->pn_min_cpus = job_desc.pn_min_cpus;
+			SWAP(job_ptr->tres_per_task, job_desc.tres_per_task);
 		}
+
+		xfree(job_desc.tres_per_task);
 	}
 	assoc_mgr_unlock(&assoc_mgr_read_lock);
 
@@ -8788,7 +8797,6 @@ static bool _valid_pn_min_mem(job_desc_msg_t *job_desc_msg,
 	uint64_t job_mem_limit = job_desc_msg->pn_min_memory;
 	uint64_t sys_mem_limit;
 	uint16_t cpus_per_node;
-	bool cpus_set = job_desc_msg->bitflags & JOB_CPUS_SET;
 
 	if (part_ptr && part_ptr->max_mem_per_cpu)
 		sys_mem_limit = part_ptr->max_mem_per_cpu;
@@ -8799,7 +8807,7 @@ static bool _valid_pn_min_mem(job_desc_msg_t *job_desc_msg,
 		return true;
 
 	if ((job_mem_limit & MEM_PER_CPU) && (sys_mem_limit & MEM_PER_CPU)) {
-		uint64_t mem_ratio, cpu_factor;
+		uint64_t mem_ratio;
 		job_mem_limit &= (~MEM_PER_CPU);
 		sys_mem_limit &= (~MEM_PER_CPU);
 		if (job_mem_limit <= sys_mem_limit)
@@ -8807,12 +8815,17 @@ static bool _valid_pn_min_mem(job_desc_msg_t *job_desc_msg,
 		mem_ratio = ROUNDUP(job_mem_limit, sys_mem_limit);
 		debug("JobId=%u: increasing cpus_per_task and decreasing mem_per_cpu by factor of %"PRIu64" based upon mem_per_cpu limits",
 		      job_desc_msg->job_id, mem_ratio);
-		if (!cpus_set || (job_desc_msg->cpus_per_task == NO_VAL16)) {
+		if (job_desc_msg->cpus_per_task == NO_VAL16)
 			job_desc_msg->cpus_per_task = mem_ratio;
-			cpu_factor = 1;
-		}
 		else
-			cpu_factor = mem_ratio;
+			job_desc_msg->cpus_per_task *= mem_ratio;
+
+		/* Update tres_per_task, but not if it wasn't set before */
+		if (job_desc_msg->bitflags & JOB_CPUS_SET)
+			slurm_option_update_tres_per_task(
+				job_desc_msg->cpus_per_task, "cpu",
+				&job_desc_msg->tres_per_task);
+
 		job_desc_msg->pn_min_memory = ((job_mem_limit + mem_ratio - 1) /
 					       mem_ratio) | MEM_PER_CPU;
 		if ((job_desc_msg->num_tasks != NO_VAL) &&
@@ -8820,17 +8833,14 @@ static bool _valid_pn_min_mem(job_desc_msg_t *job_desc_msg,
 		    (job_desc_msg->min_cpus  != NO_VAL)) {
 			job_desc_msg->min_cpus =
 				job_desc_msg->num_tasks *
-				job_desc_msg->cpus_per_task *
-				cpu_factor;
+				job_desc_msg->cpus_per_task;
 
 			if ((job_desc_msg->max_cpus != NO_VAL) &&
 			    (job_desc_msg->max_cpus < job_desc_msg->min_cpus)) {
 				job_desc_msg->max_cpus = job_desc_msg->min_cpus;
 			}
 		} else {
-			job_desc_msg->pn_min_cpus =
-				job_desc_msg->cpus_per_task *
-				cpu_factor;
+			job_desc_msg->pn_min_cpus = job_desc_msg->cpus_per_task;
 		}
 		return true;
 	}
@@ -9558,6 +9568,12 @@ static int _validate_job_desc(job_desc_msg_t *job_desc_msg, int allocate,
 	    (!job_desc_msg->work_dir || !job_desc_msg->work_dir[0])) {
 		debug("%s: job working directory has to be set", __func__);
 		return ESLURM_MISSING_WORK_DIR;
+	}
+	if ((job_desc_msg->warn_flags & KILL_JOB_RESV) &&
+	    (slurm_conf.preempt_mode == PREEMPT_MODE_OFF)) {
+		debug("%s: job specified \"R:\" option of --signal, which is incompatible with PreemptMode=OFF",
+		     __func__);
+		return ESLURM_PREEMPTION_REQUIRED;
 	}
 	if (job_desc_msg->contiguous == NO_VAL16)
 		job_desc_msg->contiguous = 0;
@@ -15380,7 +15396,7 @@ extern void job_post_resize_acctg(job_record_t *job_ptr)
 	job_ptr->tres_fmt_req_str = xstrdup(job_ptr->tres_fmt_alloc_str);
 
 	acct_policy_job_begin(job_ptr, false);
-	job_claim_resv(job_ptr);
+	resv_replace_update(job_ptr);
 
 	/*
 	 * Get new sluid now that we are basically a new job.
