@@ -1,10 +1,4 @@
-FROM rockylinux:8
-
-LABEL org.opencontainers.image.source="https://github.com/giovtorres/slurm-docker-cluster" \
-      org.opencontainers.image.title="slurm-docker-cluster" \
-      org.opencontainers.image.description="Slurm Docker cluster on Rocky Linux 8" \
-      org.label-schema.docker.cmd="docker-compose up -d" \
-      maintainer="Giovanni Torres"
+FROM rockylinux:9
 
 RUN set -ex \
     && yum makecache \
